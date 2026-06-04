@@ -8,8 +8,9 @@
   },
   "description": "Standalone stats engine for ZcashNames referral and leaderboard analytics.",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test dist/tests/*.test.js",
+    "compile": "tsc -p tsconfig.json",
+    "build": "npm run compile && node dist/scripts/generate-static-dashboard.js",
+    "test": "npm run compile && node --test dist/tests/*.test.js",
     "start": "node dist/cli.js"
   },
   "dependencies": {

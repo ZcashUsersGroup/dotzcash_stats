@@ -71,7 +71,7 @@ export interface RawWaitlistRow {
   cabal?: unknown;
 }
 
-const WAITLIST_PAGE_SIZE = 1000;
+const WAITLIST_PAGE_SIZE = 10000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function calculateGrowthPct(current: number, previous: number): number {
