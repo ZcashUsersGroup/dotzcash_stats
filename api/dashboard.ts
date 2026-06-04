@@ -1,20 +1,18 @@
-import { createDbClient } from "../dist/lib/db.js";
-import { fetchAllWaitlistRows, toWaitlistReferralRows } from "../dist/lib/leaders/stats.js";
-import { renderMarketingDashboardHtml } from "../dist/server.js";
+import { createDbClient } from "../src/lib/db.js";
+import { fetchAllWaitlistRows, toWaitlistReferralRows } from "../src/lib/leaders/stats.js";
+import { renderMarketingDashboardHtml } from "../src/server.js";
 
 export const config = {
   runtime: "nodejs",
 };
 
-export default async function handler(request) {
+export default async function handler(request: Request): Promise<Response> {
   try {
     const url = new URL(request.url);
-    const scope = "confirmed";
-
     const db = createDbClient();
     const rawRows = await fetchAllWaitlistRows(db, { onlyVerified: true });
     const rows = toWaitlistReferralRows(rawRows);
-    const html = await renderMarketingDashboardHtml(rows, scope, new Date());
+    const html = await renderMarketingDashboardHtml(rows, "confirmed", new Date());
 
     return new Response(html, {
       status: 200,
