@@ -1067,10 +1067,3 @@ export async function startMarketingDashboardServer(
 
   return server;
 }
-
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/"))) {
-  const port = Number(process.env.PORT || 3000);
-  startMarketingDashboardServer({ port }).then(() => {
-    process.stdout.write(`Referral marketing dashboard listening on http://localhost:${port}\n`);
-  });
-}
