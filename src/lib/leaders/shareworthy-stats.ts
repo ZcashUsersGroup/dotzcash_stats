@@ -124,11 +124,46 @@ export interface DashboardReferralFunnel {
   nonReferredSharePct: number;
 }
 
+export interface DashboardReferralTreeWindowStats {
+  directReferrals: number;
+  secondOrderReferrals: number;
+  thirdOrderReferrals: number;
+  fourthPlusReferrals: number;
+  indirectReferrals: number;
+  attributedReferrals: number;
+}
+
+export interface DashboardReferralTreeLeaderEntry extends DashboardReferralTreeWindowStats {
+  name: string;
+  referralCode: string;
+  canonicalReferralCode: string;
+  leaderboardRank: number | null;
+}
+
+export interface DashboardReferralTreeMoverEntry {
+  name: string;
+  referralCode: string;
+  canonicalReferralCode: string;
+  gain: number;
+  currentIndirectReferrals: number;
+  previousIndirectReferrals: number;
+  secondOrderDelta: number;
+  thirdOrderDelta: number;
+  fourthPlusDelta: number;
+  leaderboardRank: number | null;
+}
+
+export interface DashboardReferralTreeAnalysis {
+  leaders: DashboardReferralTreeLeaderEntry[];
+  movers: DashboardReferralTreeMoverEntry[];
+}
+
 export type DashboardSectionId =
   | "overview"
   | "streaks"
   | "newcomers"
   | "movers"
+  | "referral-tree"
   | "daily-review"
   | "weekly-review"
   | "leader-changes"
@@ -141,6 +176,7 @@ export interface DashboardMarketingHook {
   id: string;
   label: string;
   defaultText: string;
+  eli5Text: string;
 }
 
 export interface DashboardSectionMarketingHooks {
@@ -161,6 +197,7 @@ export interface MarketingDashboardSnapshot {
   movers: DashboardMoverEntry[];
   dailyReview: DashboardReviewBlock;
   weeklyReview: DashboardReviewBlock;
+  referralTree: DashboardReferralTreeAnalysis;
   leaderChanges: {
     allTime: DashboardLeaderChange;
     daily: DashboardLeaderChange;
@@ -261,6 +298,18 @@ function addDays(dateString: string, days: number): string {
   const date = new Date(`${dateString}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + days);
   return formatUtcDate(date);
+}
+
+function formatUtcWeekday(dateString: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    weekday: "long",
+  }).format(new Date(`${dateString}T00:00:00.000Z`));
+}
+
+function formatUtcWeekdayPossessive(dateString: string): string {
+  const weekday = formatUtcWeekday(dateString);
+  return weekday.endsWith("s") ? `${weekday}'` : `${weekday}'s`;
 }
 
 function getUtcWeekRange(date: Date): { weekStart: string; weekEnd: string; label: string } {
@@ -370,6 +419,74 @@ function buildAttributedCountsForRange(
       visited.add(currentCode);
       counts.set(currentCode, (counts.get(currentCode) ?? 0) + 1);
       currentCode = parentByCode.get(currentCode) ?? null;
+    }
+  }
+
+  return counts;
+}
+
+export function buildReferralTreeWindowCounts(
+  rows: WaitlistReferralRow[],
+  scope: ReferralScope,
+  startMs: number,
+  endMs: number,
+): Map<string, DashboardReferralTreeWindowStats> {
+  const eligibleRows = rows.filter((row) => isEligibleRow(row, scope));
+  const parentByCode = new Map<string, string | null>();
+
+  for (const row of eligibleRows) {
+    if (!row.referral_code || parentByCode.has(row.referral_code)) continue;
+    parentByCode.set(row.referral_code, row.referred_by);
+  }
+
+  const counts = new Map<string, DashboardReferralTreeWindowStats>();
+
+  const getOrCreate = (code: string): DashboardReferralTreeWindowStats => {
+    const existing = counts.get(code);
+    if (existing) return existing;
+
+    const created: DashboardReferralTreeWindowStats = {
+      directReferrals: 0,
+      secondOrderReferrals: 0,
+      thirdOrderReferrals: 0,
+      fourthPlusReferrals: 0,
+      indirectReferrals: 0,
+      attributedReferrals: 0,
+    };
+    counts.set(code, created);
+    return created;
+  };
+
+  for (const row of eligibleRows) {
+    if (!row.referred_by) continue;
+
+    const createdAtMs = new Date(row.created_at).getTime();
+    if (!Number.isFinite(createdAtMs) || createdAtMs < startMs || createdAtMs >= endMs) continue;
+
+    let currentCode: string | null = row.referred_by;
+    let depth = 1;
+    const visited = new Set<string>();
+
+    while (currentCode && !visited.has(currentCode)) {
+      visited.add(currentCode);
+      const stats = getOrCreate(currentCode);
+
+      if (depth === 1) {
+        stats.directReferrals += 1;
+      } else if (depth === 2) {
+        stats.secondOrderReferrals += 1;
+      } else if (depth === 3) {
+        stats.thirdOrderReferrals += 1;
+      } else {
+        stats.fourthPlusReferrals += 1;
+      }
+
+      stats.indirectReferrals =
+        stats.secondOrderReferrals + stats.thirdOrderReferrals + stats.fourthPlusReferrals;
+      stats.attributedReferrals = stats.directReferrals + stats.indirectReferrals;
+
+      currentCode = parentByCode.get(currentCode) ?? null;
+      depth += 1;
     }
   }
 
@@ -581,8 +698,70 @@ function buildReviewBlock(args: {
   };
 }
 
-function buildHook(id: string, label: string, defaultText: string): DashboardMarketingHook {
-  return { id, label, defaultText };
+function buildEli5Text(id: string, label: string, defaultText: string): string {
+  if (id.startsWith("section:daily-review") || id.startsWith("section:weekly-review")) {
+    return "This sums up who led the review window, by how much, and how it compared with the previous window.";
+  }
+
+  if (id.startsWith("leader-changes:all-time")) {
+    return "This compares the current all-time leader with the person who led before them.";
+  }
+
+  if (id.startsWith("leader-changes:daily")) {
+    return "This compares the top referrer for the current UTC day with the top referrer from the previous UTC day.";
+  }
+
+  if (id.startsWith("leader-changes:weekly")) {
+    return "This compares the current Monday-Sunday UTC leader with the previous week's leader.";
+  }
+
+  if (id.startsWith("overview:waitlist") || id.startsWith("funnel:waitlist")) {
+    return "People can claim their name during early access in the order they joined.";
+  }
+
+  if (id.includes("referred")) {
+    return "These signups came from someone sharing a referral code.";
+  }
+
+  if (id.includes("non-referred")) {
+    return "These people joined without using a referral code.";
+  }
+
+  if (id.includes("streak")) {
+    return "The daily winner is the person with the most direct referrals on that UTC day.";
+  }
+
+  if (id.includes("newcomer")) {
+    return "This shows how fast a new referrer started growing after their first attributed referral.";
+  }
+
+  if (id.includes("mover")) {
+    return "This compares the last 7 days with the 7 days right before that.";
+  }
+
+  if (id.includes("indirect") || id.includes("referral-tree")) {
+    return "Indirect referrals come from people referred by someone you referred, or deeper in the tree.";
+  }
+
+  if (id.includes("zec")) {
+    return id.startsWith("zec-daily:")
+      ? "This is the change in projected payout for the current UTC day compared with the previous one."
+      : "This is the change in projected payout for the current week compared with the previous week.";
+  }
+
+  if (id.includes("cabal")) {
+    return "This compares payout under commission pricing and the fixed model.";
+  }
+
+  if (id.includes("leader")) {
+    return "This shows who is currently in first place.";
+  }
+
+  return defaultText;
+}
+
+function buildHook(id: string, label: string, defaultText: string, eli5Text?: string): DashboardMarketingHook {
+  return { id, label, defaultText, eli5Text: eli5Text ?? buildEli5Text(id, label, defaultText) };
 }
 
 function leaderDisplayName(identity: DashboardLeaderIdentity | null): string {
@@ -604,7 +783,8 @@ function buildShareworthyCallouts(args: {
       buildHook(
         "shareworthy:streak",
         "Streak momentum",
-        `${args.streaks.currentLeader.name} is stacking a ${args.streaks.streakLength}-day run as the referral leader.`,
+        `${args.streaks.currentLeader.name} has led referrals for ${args.streaks.streakLength} days in a row.`,
+        "This is the strongest active daily referral streak.",
       ),
     );
   }
@@ -614,7 +794,8 @@ function buildShareworthyCallouts(args: {
       buildHook(
         `shareworthy:newcomer:${args.newcomers[0].canonicalReferralCode}`,
         "Newcomer breakout",
-        `${args.newcomers[0].name} broke into the mix with ${args.newcomers[0].current7DayAttributedReferrals} attributed referrals in 7 days.`,
+        `${args.newcomers[0].name} stood out as a new referrer with ${args.newcomers[0].current7DayAttributedReferrals} attributed referrals in 7 days.`,
+        "This highlights the strongest recent newcomer.",
       ),
     );
   }
@@ -624,7 +805,8 @@ function buildShareworthyCallouts(args: {
       buildHook(
         `shareworthy:mover:${args.movers[0].canonicalReferralCode}`,
         "Mover acceleration",
-        `${args.movers[0].name} just posted the biggest weekly jump at +${args.movers[0].gain} attributed referrals.`,
+        `${args.movers[0].name} had the biggest weekly referral gain at +${args.movers[0].gain}.`,
+        "This highlights the strongest week-over-week referral gain.",
       ),
     );
   }
@@ -634,7 +816,8 @@ function buildShareworthyCallouts(args: {
       buildHook(
         `shareworthy:weekly-flip:${args.leaderChanges.weekly.current.canonicalReferralCode}`,
         "Weekly lead flip",
-        `${args.leaderChanges.weekly.current.name} just passed ${args.leaderChanges.weekly.previous.name} for the weekly lead.`,
+        `${args.leaderChanges.weekly.current.name} passed ${args.leaderChanges.weekly.previous.name} for the weekly lead.`,
+        "This highlights a change at the top of the weekly leaderboard.",
       ),
     );
   }
@@ -644,7 +827,8 @@ function buildShareworthyCallouts(args: {
       buildHook(
         `shareworthy:zec:${args.zecChanges.weekly[0].canonicalReferralCode}`,
         "Payout momentum",
-        `${args.zecChanges.weekly[0].name} added the largest projected weekly payout swing at +${args.zecChanges.weekly[0].delta} ZEC.`,
+        `${args.zecChanges.weekly[0].name} had the biggest weekly projected payout gain at +${args.zecChanges.weekly[0].delta} ZEC.`,
+        "This highlights the biggest weekly jump in projected ZEC payout.",
       ),
     );
   }
@@ -653,7 +837,8 @@ function buildShareworthyCallouts(args: {
     buildHook(
       "shareworthy:funnel",
       "Referral mix",
-      `${args.funnel.referredSharePct}% of verified signups are referral-driven, with ${args.funnel.nonReferred} more non-referred signups still open to activate.`,
+      `${args.funnel.referredSharePct}% of verified waitlist signups came from referrals.\n\n${args.funnel.nonReferred} people signed up without a referral, so they can still be encouraged to invite others, move up the list, and earn ZEC.`,
+      "This shows how much of the verified waitlist came from referrals versus direct signup.",
     ),
   );
 
@@ -667,54 +852,115 @@ function buildSectionHooks(args: {
   movers: DashboardMoverEntry[];
   dailyReview: DashboardReviewBlock;
   weeklyReview: DashboardReviewBlock;
+  referralTree: DashboardReferralTreeAnalysis;
   leaderChanges: MarketingDashboardSnapshot["leaderChanges"];
   zecChanges: MarketingDashboardSnapshot["zecChanges"];
   cabalProtection: DashboardCabalProtectionEntry[];
   shareworthyCallouts: DashboardMarketingHook[];
   funnel: DashboardReferralFunnel;
+  currentDate: string;
 }): DashboardMarketingHooks {
   const overviewItems = [
-    buildHook("overview:waitlist", "Waitlist", `${args.headlineKpis.waitlist} verified signups are now on the waitlist, giving the campaign fresh surface area to convert.`),
-    buildHook("overview:referred", "Referred", `${args.headlineKpis.referred} verified signups came through referrals, a ${args.headlineKpis.referredSharePct}% referral share.`),
-    buildHook("overview:rewards-pot", "Rewards pot", `The projected rewards pot is already at ${roundZec(args.headlineKpis.rewardsPot).toFixed(4)} ZEC and climbing with every new referral.`),
-    buildHook("overview:all-time-leader", "All-time leader", `${leaderDisplayName(args.headlineKpis.allTimeLeader)} is the all-time pace setter for attributed referrals.`),
-    buildHook("overview:daily-leader", "Daily leader", `${leaderDisplayName(args.headlineKpis.dailyLeader)} is leading today's referral push.`),
-    buildHook("overview:weekly-leader", "Weekly leader", `${leaderDisplayName(args.headlineKpis.weeklyLeader)} is setting the weekly pace on referrals.`),
+    buildHook(
+      "overview:waitlist",
+      "Waitlist",
+      `${args.headlineKpis.waitlist} verified people are on the waitlist.`,
+      "People can claim their name during early access in the order they joined.",
+    ),
+    buildHook(
+      "overview:referred",
+      "Referred",
+      `${args.headlineKpis.referred} verified waitlist signups came from referrals. That is ${args.headlineKpis.referredSharePct}% of the total.`,
+      "These people joined with someone else's referral code.",
+    ),
+    buildHook(
+      "overview:rewards-pot",
+      "Rewards pot",
+      `The projected fixed-model rewards total is ${roundZec(args.headlineKpis.rewardsPot).toFixed(4)} ZEC.`,
+      "This is the current projected ZEC total from referral rewards.",
+    ),
+    buildHook(
+      "overview:all-time-leader",
+      "All-time leader",
+      `${leaderDisplayName(args.headlineKpis.allTimeLeader)} has the most total attributed referrals so far.`,
+      "This is the current all-time leader on the referral leaderboard.",
+    ),
+    buildHook(
+      "overview:daily-leader",
+      "Daily leader",
+      `${leaderDisplayName(args.headlineKpis.dailyLeader)} is leading ${formatUtcWeekdayPossessive(args.currentDate)} referrals.`,
+      "This is the top referrer for the current UTC day.",
+    ),
+    buildHook(
+      "overview:weekly-leader",
+      "Weekly leader",
+      `${leaderDisplayName(args.headlineKpis.weeklyLeader)} is leading this week's referrals.`,
+      "This is the top referrer for the current Monday-Sunday UTC week.",
+    ),
   ];
   const streakItems = args.streaks.recentDailyWinners.map((entry) =>
     buildHook(
       `streaks:${entry.date}:${entry.leader.canonicalReferralCode}`,
-      `${entry.date} winner`,
-      `${entry.leader.name} owned ${entry.date} with ${entry.count} direct referrals${entry.badge ? ` and a ${entry.badge} badge finish` : ""}.`,
+      `${formatUtcWeekday(entry.date)} winner`,
+      `${entry.leader.name} led ${formatUtcWeekday(entry.date)} with ${entry.count} direct referrals${
+        entry.badge === "red"
+          ? ". That was their second straight day on top"
+          : entry.badge === "blue"
+            ? ". They had the most referrals that day"
+            : ""
+      }.`,
+      "The daily winner is the person with the most direct referrals on that UTC day.",
     ),
   );
   const newcomerItems = args.newcomers.map((entry) =>
     buildHook(
       `newcomers:${entry.canonicalReferralCode}`,
       entry.name,
-      `${entry.name} turned a first referral into ${entry.current7DayAttributedReferrals} attributed signups in seven days and already sits at ${entry.totalAttributedReferrals} all-time.`,
+      `${entry.name} got their first referral and reached ${entry.current7DayAttributedReferrals} attributed signups in 7 days. They now have ${entry.totalAttributedReferrals} total.`,
+      "This shows how fast a new referrer started growing after their first attributed referral.",
     ),
   );
   const moverItems = args.movers.map((entry) =>
     buildHook(
       `movers:${entry.canonicalReferralCode}`,
       entry.name,
-      `${entry.name} accelerated by +${entry.gain} attributed referrals week over week, reaching ${entry.current7DayAttributedReferrals} in the current window.`,
+      `${entry.name} gained ${entry.gain} more attributed referrals than in the previous 7-day window.`,
+      "This compares the last 7 days with the 7 days right before that.",
     ),
   );
+  const referralTreeItems = [
+    ...args.referralTree.leaders.map((entry) =>
+      buildHook(
+        `referral-tree:leader:${entry.canonicalReferralCode}`,
+        `${entry.name} indirect leader`,
+        `${entry.name} generated ${entry.indirectReferrals} indirect referrals in the last 7 days. That includes ${entry.secondOrderReferrals} second-order and ${entry.thirdOrderReferrals} third-order referrals.`,
+        `This tracks referrals that came through ${entry.name}'s referral tree, not just direct invites.`,
+      ),
+    ),
+    ...args.referralTree.movers.map((entry) =>
+      buildHook(
+        `referral-tree:mover:${entry.canonicalReferralCode}`,
+        `${entry.name} indirect mover`,
+        `${entry.name} had ${entry.gain} more indirect referrals than in the previous 7-day window.`,
+        "This compares indirect referral growth across two back-to-back 7-day windows.",
+      ),
+    ),
+  ];
   const zecItems = [
     ...args.zecChanges.daily.map((entry) =>
       buildHook(
         `zec-daily:${entry.canonicalReferralCode}`,
-        `${entry.name} daily delta`,
-        `${entry.name} added ${entry.delta.toFixed(4)} ZEC in projected daily payout momentum.`,
+        `${entry.name} ${formatUtcWeekday(args.currentDate)} daily delta`,
+        `${entry.name} added ${entry.delta.toFixed(4)} ZEC in projected payout on ${formatUtcWeekday(args.currentDate)}.`,
+        "This is the change in projected payout for the current UTC day compared with the previous one.",
       ),
     ),
     ...args.zecChanges.weekly.map((entry) =>
       buildHook(
         `zec-weekly:${entry.canonicalReferralCode}`,
         `${entry.name} weekly delta`,
-        `${entry.name} widened the weekly payout outlook by ${entry.delta.toFixed(4)} ZEC.`,
+        `${entry.name} added ${entry.delta.toFixed(4)} ZEC in projected payout this week.`,
+        "This is the change in projected payout for the current week compared with the previous week.",
       ),
     ),
   ];
@@ -722,13 +968,55 @@ function buildSectionHooks(args: {
     buildHook(
       `cabal:${entry.canonicalReferralCode}`,
       entry.name,
-      `${entry.name} gains ${entry.protectedDelta.toFixed(4)} ZEC of protection under commission pricing versus the fixed model.`,
+      `${entry.name} gains ${entry.protectedDelta.toFixed(4)} ZEC under commission pricing versus the fixed model.`,
+      `This is how much more ${entry.name} would earn under commission pricing than under the fixed model.`,
     ),
   );
+  const leaderChangeItems = [
+    buildHook(
+      `leader-changes:all-time:${args.leaderChanges.allTime.current?.canonicalReferralCode ?? "none"}`,
+      "All-time leader change",
+      args.leaderChanges.allTime.changed && args.leaderChanges.allTime.current && args.leaderChanges.allTime.previous
+        ? `${args.leaderChanges.allTime.current.name} passed ${args.leaderChanges.allTime.previous.name} for the all-time lead.`
+        : `${leaderDisplayName(args.leaderChanges.allTime.current)} is still the all-time leader.`,
+      "This compares the current all-time leader with the person who led before them.",
+    ),
+    buildHook(
+      `leader-changes:daily:${args.leaderChanges.daily.current?.canonicalReferralCode ?? "none"}`,
+      "Daily leader change",
+      args.leaderChanges.daily.changed && args.leaderChanges.daily.current && args.leaderChanges.daily.previous
+        ? `${args.leaderChanges.daily.current.name} replaced ${args.leaderChanges.daily.previous.name} as the daily leader on ${formatUtcWeekday(args.currentDate)}.`
+        : `${leaderDisplayName(args.leaderChanges.daily.current)} is still leading ${formatUtcWeekday(args.currentDate)}.`,
+      "This compares the top referrer for the current UTC day with the top referrer from the previous UTC day.",
+    ),
+    buildHook(
+      `leader-changes:weekly:${args.leaderChanges.weekly.current?.canonicalReferralCode ?? "none"}`,
+      "Weekly leader change",
+      args.leaderChanges.weekly.changed && args.leaderChanges.weekly.current && args.leaderChanges.weekly.previous
+        ? `${args.leaderChanges.weekly.current.name} passed ${args.leaderChanges.weekly.previous.name} for the weekly lead.`
+        : `${leaderDisplayName(args.leaderChanges.weekly.current)} is still leading the week.`,
+      "This compares the current Monday-Sunday UTC leader with the previous week's leader.",
+    ),
+  ];
   const funnelItems = [
-    buildHook("funnel:referred", "Referred signups", `${args.funnel.referred} verified signups are referral-driven, accounting for ${args.funnel.referredSharePct}% of the funnel.`),
-    buildHook("funnel:non-referred", "Non-referred signups", `${args.funnel.nonReferred} verified signups still have no referral tie, leaving room for activation plays.`),
-    buildHook("funnel:waitlist", "Funnel waitlist", `${args.funnel.waitlist} verified signups define the current referral funnel baseline.`),
+    buildHook(
+      "funnel:referred",
+      "Referred signups",
+      `${args.funnel.referred} verified waitlist signups came from referrals. That is ${args.funnel.referredSharePct}% of the total.`,
+      "These signups came from someone sharing a referral code.",
+    ),
+    buildHook(
+      "funnel:non-referred",
+      "Non-referred signups",
+      `${args.funnel.nonReferred} people signed up without a referral. They can still be encouraged to invite others, move up the list, and earn ZEC.`,
+      "These people joined without using a referral code.",
+    ),
+    buildHook(
+      "funnel:waitlist",
+      "Funnel waitlist",
+      `${args.funnel.waitlist} verified people are currently on the waitlist.`,
+      "People can claim their name during early access in the order they joined.",
+    ),
   ];
 
   return {
@@ -737,7 +1025,8 @@ function buildSectionHooks(args: {
         section: buildHook(
           "section:overview",
           "Overview",
-          `${leaderDisplayName(args.headlineKpis.weeklyLeader)} is setting the weekly pace while referrals already drive ${args.headlineKpis.referredSharePct}% of verified signups.`,
+          `${leaderDisplayName(args.headlineKpis.weeklyLeader)} is leading this week's referrals. ${args.headlineKpis.referredSharePct}% of verified waitlist signups came from referrals.`,
+          "People can claim their name during early access in the order they joined. They can move up the list and earn ZEC by inviting others.",
         ),
         items: overviewItems,
       },
@@ -746,8 +1035,9 @@ function buildSectionHooks(args: {
           "section:streaks",
           "Streaks",
           args.streaks.currentLeader
-            ? `${args.streaks.currentLeader.name} is defending a ${args.streaks.streakLength}-day streak, giving the campaign a repeatable daily winner story.`
-            : "The streak board is still open, giving the next referrer a clean shot at owning the daily story.",
+            ? `${args.streaks.currentLeader.name} has led referrals for ${args.streaks.streakLength} days in a row.`
+            : "No one has a referral streak right now.",
+          "A streak means the same person had the most direct referrals on back-to-back UTC days.",
         ),
         items: streakItems,
       },
@@ -756,8 +1046,9 @@ function buildSectionHooks(args: {
           "section:newcomers",
           "Top newcomers",
           args.newcomers[0]
-            ? `${args.newcomers[0].name} leads the latest wave of newcomer activation with ${args.newcomers[0].current7DayAttributedReferrals} attributed referrals in seven days.`
-            : "No fresh newcomer breakout has landed in the current seven-day window yet.",
+            ? `${args.newcomers[0].name} had the strongest new referral start in the last 7 days with ${args.newcomers[0].current7DayAttributedReferrals} attributed referrals.`
+            : "No new referral breakout happened in the last 7 days.",
+          "A newcomer is someone who only recently started getting credited with referrals.",
         ),
         items: newcomerItems,
       },
@@ -766,10 +1057,22 @@ function buildSectionHooks(args: {
           "section:movers",
           "Top movers",
           args.movers[0]
-            ? `${args.movers[0].name} is the momentum story of the week after adding ${args.movers[0].gain} more attributed referrals than the prior window.`
-            : "The mover board is flat right now, which makes the next gain especially visible.",
+            ? `${args.movers[0].name} had the biggest 7-day referral gain, up ${args.movers[0].gain} from the prior 7 days.`
+            : "No one posted a positive referral gain in the current 7-day window.",
+          "This compares the last 7 days with the 7 days right before that.",
         ),
         items: moverItems,
+      },
+      "referral-tree": {
+        section: buildHook(
+          "section:referral-tree",
+          "Referral tree",
+          args.referralTree.leaders[0]
+            ? `${args.referralTree.leaders[0].name} led indirect referrals in the last 7 days with ${args.referralTree.leaders[0].indirectReferrals} second-order-or-deeper referrals.`
+            : "No indirect referral activity showed up in the current 7-day window.",
+          "Indirect referrals come from people referred by someone you referred, or deeper in the tree.",
+        ),
+        items: referralTreeItems,
       },
       "daily-review": {
         section: buildHook(
@@ -792,18 +1095,20 @@ function buildSectionHooks(args: {
           "section:leader-changes",
           "Leader changes",
           args.leaderChanges.weekly.changed && args.leaderChanges.weekly.current && args.leaderChanges.weekly.previous
-            ? `${args.leaderChanges.weekly.current.name} flipped the weekly leaderboard away from ${args.leaderChanges.weekly.previous.name}.`
-            : `${leaderDisplayName(args.leaderChanges.weekly.current)} is holding the weekly top spot without a leaderboard shakeup.`,
+            ? `${args.leaderChanges.weekly.current.name} took the weekly lead from ${args.leaderChanges.weekly.previous.name}.`
+            : `${leaderDisplayName(args.leaderChanges.weekly.current)} is still leading the week.`,
+          "This section shows whether the top spot changed for all-time, daily, or weekly leaderboards.",
         ),
-        items: [],
+        items: leaderChangeItems,
       },
       "zec-changes": {
         section: buildHook(
           "section:zec-changes",
           "ZEC changes",
           args.zecChanges.weekly[0]
-            ? `${args.zecChanges.weekly[0].name} leads projected payout growth with a ${args.zecChanges.weekly[0].delta.toFixed(4)} ZEC weekly lift.`
-            : "Projected ZEC payouts are stable right now, with no positive delta leader yet.",
+            ? `${args.zecChanges.weekly[0].name} had the biggest projected ZEC gain this week, up ${args.zecChanges.weekly[0].delta.toFixed(4)} ZEC.`
+            : "No one posted a positive projected ZEC gain in the current comparison window.",
+          "This shows whose projected payout increased the most.",
         ),
         items: zecItems,
       },
@@ -812,8 +1117,9 @@ function buildSectionHooks(args: {
           "section:cabal-protection",
           "Cabal protection",
           args.cabalProtection[0]
-            ? `${args.cabalProtection[0].name} benefits most from commission protection at +${args.cabalProtection[0].protectedDelta.toFixed(4)} ZEC over fixed pricing.`
-            : "No cabal protection edge is visible in the current verified data set.",
+            ? `${args.cabalProtection[0].name} gains the most under commission pricing, at ${args.cabalProtection[0].protectedDelta.toFixed(4)} ZEC more than the fixed model.`
+            : "No cabal protection difference is visible in the current verified data.",
+          "This compares projected payout under the commission model and the fixed model.",
         ),
         items: cabalItems,
       },
@@ -821,7 +1127,8 @@ function buildSectionHooks(args: {
         section: buildHook(
           "section:shareworthy",
           "Shareworthy callouts",
-          args.shareworthyCallouts[0]?.defaultText ?? "The dashboard is ready to surface its next shareable referral story.",
+          args.shareworthyCallouts[0]?.defaultText ?? "No shareworthy referral highlight is ready right now.",
+          "These are short social-ready referral highlights from the current dashboard.",
         ),
         items: args.shareworthyCallouts,
       },
@@ -829,7 +1136,8 @@ function buildSectionHooks(args: {
         section: buildHook(
           "section:funnel",
           "Referral funnel",
-          `${args.funnel.referredSharePct}% of verified signups are referral-led, while ${args.funnel.nonReferred} signups remain open to conversion nudges.`,
+          `${args.funnel.referredSharePct}% of verified waitlist signups came from referrals.\n\n${args.funnel.nonReferred} people signed up without a referral, so they can still be encouraged to invite others, move up the list, and earn ZEC.`,
+          "People can claim their name during early access in the order they joined. They can move up the list and earn ZEC by inviting others.",
         ),
         items: funnelItems,
       },
@@ -849,6 +1157,8 @@ export function buildMarketingDashboardSnapshot(
   const nowMs = now.getTime();
   const current7DayCounts = buildAttributedCountsForRange(rows, scope, nowMs - WEEK_MS, nowMs + 1);
   const previous7DayCounts = buildAttributedCountsForRange(rows, scope, nowMs - 2 * WEEK_MS, nowMs - WEEK_MS);
+  const currentReferralTreeCounts = buildReferralTreeWindowCounts(rows, scope, nowMs - WEEK_MS, nowMs + 1);
+  const previousReferralTreeCounts = buildReferralTreeWindowCounts(rows, scope, nowMs - 2 * WEEK_MS, nowMs - WEEK_MS);
   const allTimeAttributed = buildAllTimeAttributedStats(rows, scope);
   const latestDaily = leaders.dailyRankings.at(-1) ?? null;
   const previousDaily = leaders.dailyRankings.at(-2) ?? null;
@@ -954,6 +1264,87 @@ export function buildMarketingDashboardSnapshot(
       return a.canonicalReferralCode.localeCompare(b.canonicalReferralCode);
     })
     .slice(0, TOP_LIMIT);
+
+  const referralTreeLeaderCodes = new Set<string>([
+    ...currentReferralTreeCounts.keys(),
+    ...previousReferralTreeCounts.keys(),
+  ]);
+  const referralTreeLeaders = [...referralTreeLeaderCodes]
+    .map((code) => {
+      const identity = buildLeaderIdentity(code, metadata);
+      if (!identity) return null;
+
+      const currentStats = currentReferralTreeCounts.get(code);
+      if (!currentStats || currentStats.indirectReferrals <= 0) return null;
+
+      return {
+        name: identity.name,
+        referralCode: identity.referralCode,
+        canonicalReferralCode: code,
+        leaderboardRank: leaderboardByCode.get(code)?.rank ?? null,
+        ...currentStats,
+      };
+    })
+    .filter((entry): entry is DashboardReferralTreeLeaderEntry => entry !== null)
+    .sort((a, b) => {
+      if (b.indirectReferrals !== a.indirectReferrals) return b.indirectReferrals - a.indirectReferrals;
+      if (b.attributedReferrals !== a.attributedReferrals) return b.attributedReferrals - a.attributedReferrals;
+      return a.canonicalReferralCode.localeCompare(b.canonicalReferralCode);
+    })
+    .slice(0, TOP_LIMIT);
+
+  const referralTreeMovers = [...referralTreeLeaderCodes]
+    .map((code) => {
+      const identity = buildLeaderIdentity(code, metadata);
+      if (!identity) return null;
+
+      const currentStats = currentReferralTreeCounts.get(code) ?? {
+        directReferrals: 0,
+        secondOrderReferrals: 0,
+        thirdOrderReferrals: 0,
+        fourthPlusReferrals: 0,
+        indirectReferrals: 0,
+        attributedReferrals: 0,
+      };
+      const previousStats = previousReferralTreeCounts.get(code) ?? {
+        directReferrals: 0,
+        secondOrderReferrals: 0,
+        thirdOrderReferrals: 0,
+        fourthPlusReferrals: 0,
+        indirectReferrals: 0,
+        attributedReferrals: 0,
+      };
+      const gain = currentStats.indirectReferrals - previousStats.indirectReferrals;
+
+      if (gain <= 0) return null;
+
+      return {
+        name: identity.name,
+        referralCode: identity.referralCode,
+        canonicalReferralCode: code,
+        gain,
+        currentIndirectReferrals: currentStats.indirectReferrals,
+        previousIndirectReferrals: previousStats.indirectReferrals,
+        secondOrderDelta: currentStats.secondOrderReferrals - previousStats.secondOrderReferrals,
+        thirdOrderDelta: currentStats.thirdOrderReferrals - previousStats.thirdOrderReferrals,
+        fourthPlusDelta: currentStats.fourthPlusReferrals - previousStats.fourthPlusReferrals,
+        leaderboardRank: leaderboardByCode.get(code)?.rank ?? null,
+      };
+    })
+    .filter((entry): entry is DashboardReferralTreeMoverEntry => entry !== null)
+    .sort((a, b) => {
+      if (b.gain !== a.gain) return b.gain - a.gain;
+      if (b.currentIndirectReferrals !== a.currentIndirectReferrals) {
+        return b.currentIndirectReferrals - a.currentIndirectReferrals;
+      }
+      return a.canonicalReferralCode.localeCompare(b.canonicalReferralCode);
+    })
+    .slice(0, TOP_LIMIT);
+
+  const referralTree: DashboardReferralTreeAnalysis = {
+    leaders: referralTreeLeaders,
+    movers: referralTreeMovers,
+  };
 
   const allTimePreviousLeader = buildLeaderboardFromRows(previousAllTimeRows, scope, new Date(startOfTodayMs - 1))[0] ?? null;
   const leaderChanges = {
@@ -1101,11 +1492,13 @@ export function buildMarketingDashboardSnapshot(
     movers,
     dailyReview,
     weeklyReview,
+    referralTree,
     leaderChanges,
     zecChanges,
     cabalProtection,
     shareworthyCallouts,
     funnel,
+    currentDate,
   });
 
   return {
@@ -1117,6 +1510,7 @@ export function buildMarketingDashboardSnapshot(
     movers,
     dailyReview,
     weeklyReview,
+    referralTree,
     leaderChanges,
     zecChanges,
     cabalProtection,
