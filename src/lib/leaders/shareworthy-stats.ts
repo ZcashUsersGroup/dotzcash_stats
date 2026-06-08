@@ -582,17 +582,17 @@ function getNextCommissionTier(totalAttributedReferrals: number): { referralsToN
 
 function buildCabalHookText(entry: DashboardCabalProtectionEntry): string {
   const currentRate = formatRatePercent(entry.commissionRate * 100);
-  const baseText = `${entry.name}, your current potential payout is ${entry.commissionPayout.toFixed(4)} ZEC under ${currentRate} commission pricing, compared with ${entry.fixedPayout.toFixed(4)} ZEC under the fixed model. Make sure your referrals purchase their name during the upcoming early access period.`;
+  const baseText = `${entry.name}, you're projected to earn ${entry.commissionPayout.toFixed(4)} ZEC at ${currentRate} commission, compared with ${entry.fixedPayout.toFixed(4)} ZEC under the fixed model.`;
 
   if (
     entry.referralsToNextTier === null ||
     entry.nextTierRate === null ||
     entry.nextTierProjectedPayout === null
   ) {
-    return `${baseText} You are already at the top 30% commission tier.`;
+    return `${baseText}\n\nYou are already at the top 30% commission tier.\n\nReferrals must buy during early access to count.`;
   }
 
-  return `${baseText} ${entry.referralsToNextTier} more referrals get you to the ${formatRatePercent(entry.nextTierRate * 100)} commission tier. On the same current projected revenue base, that tier alone would raise your payout to ${entry.nextTierProjectedPayout.toFixed(4)} ZEC.`;
+  return `${baseText}\n\n${entry.referralsToNextTier} more referrals get you to the ${formatRatePercent(entry.nextTierRate * 100)} tier, raising this projection to ${entry.nextTierProjectedPayout.toFixed(4)} ZEC.\n\nReferrals must buy during early access to count.`;
 }
 
 function buildWindowSummaryFromCounts(
