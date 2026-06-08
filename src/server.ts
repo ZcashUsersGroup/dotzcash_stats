@@ -322,8 +322,10 @@ function renderDocument(snapshot: MarketingDashboardSnapshot, datePicker?: Dashb
       `<strong>${escapeHtml(entry.name)}</strong><span class="meta">@${escapeHtml(entry.referralCode)}</span>`,
       formatZec(entry.fixedPayout),
       formatZec(entry.commissionPayout),
-      formatZec(entry.protectedDelta),
       formatPercent(entry.commissionRate * 100),
+      entry.referralsToNextTier === null
+        ? "At max tier"
+        : `${formatNumber(entry.referralsToNextTier)} to ${formatPercent((entry.nextTierRate ?? 0) * 100)}`,
     ],
     hook: sections["cabal-protection"].items[index],
   }));
@@ -339,7 +341,7 @@ function renderDocument(snapshot: MarketingDashboardSnapshot, datePicker?: Dashb
     ["weekly-review", "Weekly review"],
     ["leader-changes", "Leader changes"],
     ["zec-changes", "ZEC changes"],
-    ["cabal-protection", "Cabal protection"],
+    ["cabal-protection", "Cabal rewards"],
     ["shareworthy", "Shareworthy callouts"],
     ["funnel", "Referral funnel"],
   ];
@@ -1040,13 +1042,13 @@ function renderDocument(snapshot: MarketingDashboardSnapshot, datePicker?: Dashb
         <section class="panel" id="cabal-protection">
           <div class="section-head">
             <div>
-              <span class="eyebrow">Cabal protection</span>
-              <h2>Commission rate protection versus fixed rate</h2>
+              <span class="eyebrow">Cabal rewards</span>
+              <h2>Cabal commission versus fixed rate</h2>
             </div>
             <span class="chip">Internal only</span>
           </div>
           ${renderSectionHookComposer(sections["cabal-protection"].section)}
-          ${renderRowsTable(["Member", "Fixed", "Commission", "Protected Delta", "Rate"], cabalRows, "No cabal members found in the current data set.")}
+          ${renderRowsTable(["Member", "Fixed", "Commission", "Rate", "Next Tier"], cabalRows, "No cabal members found in the current data set.")}
         </section>
 
         <div class="callout-grid">

@@ -110,10 +110,15 @@ export interface DashboardCabalProtectionEntry {
   name: string;
   referralCode: string;
   canonicalReferralCode: string;
+  totalAttributedReferrals: number;
+  projectedRevenue: number;
   fixedPayout: number;
   commissionPayout: number;
   protectedDelta: number;
   commissionRate: number;
+  referralsToNextTier: number | null;
+  nextTierRate: number | null;
+  nextTierProjectedPayout: number | null;
 }
 
 export interface DashboardReferralFunnel {
@@ -245,10 +250,15 @@ export interface ShareworthyStatsSnapshot {
   cabalProtection: Array<{
     referralCode: string;
     canonicalReferralCode: string;
+    totalAttributedReferrals: number;
+    projectedRevenue: number;
     fixedPayout: number;
     commissionPayout: number;
     protectedDelta: number;
     commissionRate: number;
+    referralsToNextTier: number | null;
+    nextTierRate: number | null;
+    nextTierProjectedPayout: number | null;
   }>;
 }
 
@@ -276,6 +286,14 @@ function roundPct(value: number): number {
   return Math.round(value * 10) / 10;
 }
 
+const COMMISSION_TIERS = [
+  { threshold: 0, rate: 0.15 },
+  { threshold: 500, rate: 0.18 },
+  { threshold: 1500, rate: 0.2 },
+  { threshold: 3000, rate: 0.25 },
+  { threshold: 5000, rate: 0.3 },
+] as const;
+
 function calculateGrowthPct(current: number, previous: number): number {
   if (previous === 0) return current === 0 ? 0 : Number.POSITIVE_INFINITY;
   return Math.round(((current - previous) / previous) * 100);
@@ -288,6 +306,10 @@ function safePct(numerator: number, denominator: number): number {
 
 function formatInfinitePct(value: number): string {
   return Number.isFinite(value) ? `${value}%` : "up from zero";
+}
+
+function formatRatePercent(value: number): string {
+  return `${roundPct(value)}%`;
 }
 
 function formatUtcDate(date: Date): string {
@@ -544,6 +566,33 @@ function buildLeaderIdentity(code: string | null, metadata: Map<string, CodeMeta
     referralCode: info?.referralCode ?? code,
     canonicalReferralCode: code,
   };
+}
+
+function getNextCommissionTier(totalAttributedReferrals: number): { referralsToNextTier: number | null; nextTierRate: number | null } {
+  const nextTier = COMMISSION_TIERS.find((tier) => tier.threshold > totalAttributedReferrals);
+  if (!nextTier) {
+    return { referralsToNextTier: null, nextTierRate: null };
+  }
+
+  return {
+    referralsToNextTier: nextTier.threshold - totalAttributedReferrals,
+    nextTierRate: nextTier.rate,
+  };
+}
+
+function buildCabalHookText(entry: DashboardCabalProtectionEntry): string {
+  const currentRate = formatRatePercent(entry.commissionRate * 100);
+  const baseText = `${entry.name}, your current potential payout is ${entry.commissionPayout.toFixed(4)} ZEC under ${currentRate} commission pricing, compared with ${entry.fixedPayout.toFixed(4)} ZEC under the fixed model. Make sure your referrals purchase their name during the upcoming early access period.`;
+
+  if (
+    entry.referralsToNextTier === null ||
+    entry.nextTierRate === null ||
+    entry.nextTierProjectedPayout === null
+  ) {
+    return `${baseText} You are already at the top 30% commission tier.`;
+  }
+
+  return `${baseText} ${entry.referralsToNextTier} more referrals get you to the ${formatRatePercent(entry.nextTierRate * 100)} commission tier. On the same current projected revenue base, that tier alone would raise your payout to ${entry.nextTierProjectedPayout.toFixed(4)} ZEC.`;
 }
 
 function buildWindowSummaryFromCounts(
@@ -968,7 +1017,7 @@ function buildSectionHooks(args: {
     buildHook(
       `cabal:${entry.canonicalReferralCode}`,
       entry.name,
-      `${entry.name} gains ${entry.protectedDelta.toFixed(4)} ZEC under commission pricing versus the fixed model.`,
+      buildCabalHookText(entry),
       `This is how much more ${entry.name} would earn under commission pricing than under the fixed model.`,
     ),
   );
@@ -1115,7 +1164,7 @@ function buildSectionHooks(args: {
       "cabal-protection": {
         section: buildHook(
           "section:cabal-protection",
-          "Cabal protection",
+          "Cabal rewards",
           args.cabalProtection[0]
             ? `${args.cabalProtection[0].name} gains the most under commission pricing, at ${args.cabalProtection[0].protectedDelta.toFixed(4)} ZEC more than the fixed model.`
             : "No cabal protection difference is visible in the current verified data.",
@@ -1456,10 +1505,20 @@ export function buildMarketingDashboardSnapshot(
         name: identity.name,
         referralCode: dashboard.referralCode,
         canonicalReferralCode: dashboard.canonicalReferralCode,
+        totalAttributedReferrals: dashboard.totalAttributedReferrals,
+        projectedRevenue: roundZec(commission.projectedRevenue),
         fixedPayout: roundZec(fixed.projectedPayout),
         commissionPayout: roundZec(commission.projectedPayout),
         protectedDelta: roundZec(commission.projectedPayout - fixed.projectedPayout),
         commissionRate: commission.commissionRate,
+        ...(() => {
+          const nextTier = getNextCommissionTier(dashboard.totalAttributedReferrals);
+          return {
+            ...nextTier,
+            nextTierProjectedPayout:
+              nextTier.nextTierRate === null ? null : roundZec(commission.projectedRevenue * nextTier.nextTierRate),
+          };
+        })(),
       };
     })
     .filter((entry): entry is DashboardCabalProtectionEntry => Boolean(entry))
@@ -1571,10 +1630,15 @@ export function buildShareworthyStatsSnapshot(
     cabalProtection: marketing.cabalProtection.map((entry) => ({
       referralCode: entry.referralCode,
       canonicalReferralCode: entry.canonicalReferralCode,
+      totalAttributedReferrals: entry.totalAttributedReferrals,
+      projectedRevenue: entry.projectedRevenue,
       fixedPayout: entry.fixedPayout,
       commissionPayout: entry.commissionPayout,
       protectedDelta: entry.protectedDelta,
       commissionRate: entry.commissionRate,
+      referralsToNextTier: entry.referralsToNextTier,
+      nextTierRate: entry.nextTierRate,
+      nextTierProjectedPayout: entry.nextTierProjectedPayout,
     })),
   };
 }
