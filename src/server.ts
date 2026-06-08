@@ -15,9 +15,24 @@ export interface MarketingDashboardServerOptions {
   defaultScope?: ReferralScope;
 }
 
+interface DashboardDatePickerOptions {
+  selectedDate: string;
+  minDate: string;
+  maxDate: string;
+  latestDate: string;
+  latestHref: string;
+  dateHrefPrefix: string;
+}
+
 interface CachedDashboard {
   html: string;
   generatedAt: number;
+}
+
+export interface RenderMarketingDashboardPageOptions extends MarketingDashboardServerOptions {
+  cache?: Map<string, CachedDashboard>;
+  requestUrl?: string;
+  requestedDate?: string | null;
 }
 
 const DASHBOARD_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -83,6 +98,35 @@ interface TableRowData {
   hook?: DashboardMarketingHook;
 }
 
+function formatUtcDate(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function getLatestRowDate(rows: WaitlistReferralRow[], fallbackDate = new Date()): string {
+  if (rows.length === 0) {
+    return formatUtcDate(fallbackDate);
+  }
+
+  return rows.reduce((latestDate, row) => {
+    const rowDate = row.created_at.slice(0, 10);
+    return rowDate > latestDate ? rowDate : latestDate;
+  }, rows[0].created_at.slice(0, 10));
+}
+
+function endOfUtcDay(dateString: string): Date {
+  return new Date(`${dateString}T23:59:59.999Z`);
+}
+
+function startOfNextUtcDay(dateString: string): Date {
+  const date = new Date(`${dateString}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date;
+}
+
+function isIsoDate(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
 function renderLeader(identity: MarketingDashboardSnapshot["headlineKpis"]["allTimeLeader"]): string {
   if (!identity) return "<span class=\"muted\">None</span>";
   return `<strong>${escapeHtml(identity.name)}</strong><span class="meta">@${escapeHtml(identity.referralCode)}</span>`;
@@ -106,6 +150,7 @@ function renderSectionHookComposer(hook: DashboardMarketingHook): string {
         <div class="hook-actions">
           <button class="hook-action" type="button" data-hook-copy="${escapeHtml(hook.id)}">Copy</button>
           <button class="hook-action secondary" type="button" data-hook-reset="${escapeHtml(hook.id)}">Reset</button>
+          <button class="hook-action more" type="button" data-hook-more="${escapeHtml(hook.id)}">More</button>
         </div>
       </div>
       <textarea class="hook-textarea" rows="2" data-hook-input="${escapeHtml(hook.id)}">${escapeHtml(hook.defaultText)}</textarea>
@@ -130,21 +175,23 @@ function renderRowsTable(headers: string[], rows: TableRowData[], emptyLabel: st
   }
 
   return `
-    <table>
-      <thead>
-        <tr>
-          ${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}
-          <th class="hook-col">Hook</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${rows
-          .map(
-            (row) => `<tr>${row.cells.map((cell) => `<td>${cell}</td>`).join("")}<td class="hook-cell">${row.hook ? renderHookTrigger(row.hook) : ""}</td></tr>`,
-          )
-          .join("")}
-      </tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            ${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}
+            <th class="hook-col">Hook</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows
+            .map(
+              (row) => `<tr>${row.cells.map((cell) => `<td>${cell}</td>`).join("")}<td class="hook-cell">${row.hook ? renderHookTrigger(row.hook) : ""}</td></tr>`,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
   `;
 }
 
@@ -180,16 +227,22 @@ function renderReviewBlock(title: string, review: MarketingDashboardSnapshot["da
           <p>Non-referred share: ${formatPercent(review.campaignHealth.nonReferredSharePct)}.</p>
           <p>Rewards pot delta: ${formatZec(review.campaignHealth.rewardsDelta)}.</p>
         </article>
-        <article class="subpanel narrative">
-          <h3>Narrative Summary</h3>
-          <p>${escapeHtml(review.narrativeSummary)}</p>
-        </article>
       </div>
     </section>
   `;
 }
 
-function renderDocument(snapshot: MarketingDashboardSnapshot): string {
+function renderHookableSubpanel(title: string, paragraphs: string[], hook?: DashboardMarketingHook, highlighted = false): string {
+  return `<article class="subpanel${highlighted ? " subpanel-highlight" : ""}">
+    <div class="stat-card-top">
+      <h3>${escapeHtml(title)}</h3>
+      ${hook ? renderHookTrigger(hook) : ""}
+    </div>
+    ${paragraphs.map((paragraph) => `<p>${paragraph}</p>`).join("")}
+  </article>`;
+}
+
+function renderDocument(snapshot: MarketingDashboardSnapshot, datePicker?: DashboardDatePickerOptions): string {
   const sections = snapshot.marketingHooks.sections;
   const formattedTimestamps = formatDashboardTimestamps(snapshot.generatedAt);
   const newcomerRows: TableRowData[] = snapshot.newcomers.map((entry, index) => ({
@@ -211,6 +264,32 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
       entry.leaderboardRank === null ? "n/a" : `#${formatNumber(entry.leaderboardRank)}`,
     ],
     hook: sections.movers.items[index],
+  }));
+  const referralTreeLeaderRows: TableRowData[] = snapshot.referralTree.leaders.map((entry, index) => ({
+    cells: [
+      `<strong>${escapeHtml(entry.name)}</strong><span class="meta">@${escapeHtml(entry.referralCode)}</span>`,
+      formatNumber(entry.indirectReferrals),
+      formatNumber(entry.secondOrderReferrals),
+      formatNumber(entry.thirdOrderReferrals),
+      formatNumber(entry.fourthPlusReferrals),
+      formatNumber(entry.directReferrals),
+      formatNumber(entry.attributedReferrals),
+      entry.leaderboardRank === null ? "n/a" : `#${formatNumber(entry.leaderboardRank)}`,
+    ],
+    hook: sections["referral-tree"].items[index],
+  }));
+  const referralTreeMoverRows: TableRowData[] = snapshot.referralTree.movers.map((entry, index) => ({
+    cells: [
+      `<strong>${escapeHtml(entry.name)}</strong><span class="meta">@${escapeHtml(entry.referralCode)}</span>`,
+      `+${formatNumber(entry.gain)}`,
+      formatNumber(entry.currentIndirectReferrals),
+      formatNumber(entry.previousIndirectReferrals),
+      `${entry.secondOrderDelta >= 0 ? "+" : ""}${formatNumber(entry.secondOrderDelta)}`,
+      `${entry.thirdOrderDelta >= 0 ? "+" : ""}${formatNumber(entry.thirdOrderDelta)}`,
+      `${entry.fourthPlusDelta >= 0 ? "+" : ""}${formatNumber(entry.fourthPlusDelta)}`,
+      entry.leaderboardRank === null ? "n/a" : `#${formatNumber(entry.leaderboardRank)}`,
+    ],
+    hook: sections["referral-tree"].items[snapshot.referralTree.leaders.length + index],
   }));
   const streakRows: TableRowData[] = snapshot.streaks.recentDailyWinners.map((entry, index) => ({
     cells: [
@@ -255,6 +334,7 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
     ["streaks", "Streaks"],
     ["newcomers", "Top newcomers"],
     ["movers", "Top movers"],
+    ["referral-tree", "Referral tree"],
     ["daily-review", "Daily review"],
     ["weekly-review", "Weekly review"],
     ["leader-changes", "Leader changes"],
@@ -313,6 +393,13 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
           gap: 16px;
           align-items: stretch;
           flex-wrap: wrap;
+        }
+        .hero-meta {
+          display: grid;
+          gap: 16px;
+          align-content: start;
+          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+          flex: 0 1 620px;
         }
         .hero h1 {
           margin: 8px 0 10px;
@@ -450,7 +537,6 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
           font-size: 0.85rem;
         }
         .hero-status {
-          min-width: 280px;
           display: grid;
           gap: 12px;
           align-content: start;
@@ -464,6 +550,31 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
           gap: 6px;
           color: var(--muted);
           font-size: 0.9rem;
+        }
+        .date-picker-card {
+          display: grid;
+          gap: 10px;
+          padding: 16px 18px;
+          border-radius: 18px;
+          border: 1px solid var(--line);
+          background: rgba(255, 248, 236, 0.92);
+        }
+        .date-picker-copy {
+          color: var(--muted);
+          font-size: 0.9rem;
+        }
+        .date-picker-label {
+          color: var(--muted);
+          font-size: 0.85rem;
+        }
+        .date-picker-input {
+          width: 100%;
+          border: 1px solid var(--line);
+          border-radius: 14px;
+          padding: 10px 12px;
+          font: inherit;
+          color: var(--text);
+          background: rgba(255,255,255,0.82);
         }
         .hero-status-copy strong {
           color: var(--text);
@@ -486,12 +597,23 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
           padding: 18px;
           background: var(--panel-strong);
         }
+        .subpanel-highlight {
+          border-color: rgba(179, 74, 34, 0.55);
+          background: linear-gradient(180deg, rgba(255, 231, 197, 0.95), rgba(255, 246, 229, 0.98));
+          box-shadow: 0 20px 48px rgba(179, 74, 34, 0.18);
+        }
         .narrative {
           background: linear-gradient(180deg, rgba(255,245,228,0.95), rgba(246,233,214,0.95));
+        }
+        .table-wrap {
+          width: 100%;
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
         }
         table {
           width: 100%;
           border-collapse: collapse;
+          min-width: 620px;
         }
         th, td {
           text-align: left;
@@ -541,6 +663,12 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
         }
         .hook-action.secondary {
           background: transparent;
+        }
+        .hook-modal-actions .hook-action.more {
+          margin-left: auto;
+        }
+        .hook-actions .hook-action.more {
+          margin-left: auto;
         }
         .hook-col,
         .hook-cell {
@@ -646,12 +774,72 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
           color: var(--muted);
           font-size: 0.9rem;
         }
+        .stacked-panels {
+          display: grid;
+          gap: 18px;
+        }
+        @media (max-width: 1080px) {
+          .toc {
+            position: static;
+            margin: 12px 14px 0;
+          }
+        }
         @media (max-width: 720px) {
           .shell { padding: 20px 14px 40px; }
           .hero, .panel { padding: 18px; }
-          th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { display: none; }
+          header.hero { border-radius: 20px; }
+          .hero-top, .hero-meta, .stats-grid, .table-grid, .dual-grid, .leader-grid, .callout-grid, .review-grid, .stacked-panels {
+            grid-template-columns: 1fr;
+          }
+          .stat-card { min-height: unset; }
+          .toc {
+            margin: 10px 14px 0;
+          }
+          .toc details {
+            min-width: 0;
+            width: 100%;
+          }
           .hook-col, .hook-cell { width: 52px; }
-          .section-hook-head, .hook-modal-head, .hook-modal-actions { align-items: flex-start; flex-direction: column; }
+          .section-hook-head {
+            align-items: flex-start;
+            flex-direction: column;
+          }
+          .hook-actions,
+          .hook-modal-head,
+          .hook-modal-actions {
+            flex-direction: row;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+          }
+          .hook-action, .refresh-link {
+            width: 100%;
+            justify-content: center;
+          }
+          .hook-actions .hook-action,
+          .hook-modal-actions .hook-action,
+          .hook-modal-close {
+            width: auto;
+          }
+          .hook-actions .hook-action.more,
+          .hook-modal-actions .hook-action.more {
+            margin-left: auto;
+          }
+          .hook-modal {
+            padding: 12px;
+          }
+          .hook-modal-card {
+            width: 100%;
+            padding: 18px;
+            border-radius: 20px;
+          }
+          .hook-modal textarea,
+          .hook-textarea {
+            min-height: 140px;
+          }
+          table {
+            min-width: 560px;
+          }
         }
       </style>
     </head>
@@ -672,13 +860,37 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
               <h1>Referral momentum at a glance</h1>
               <p>Volume-first view of streaks, movers, review summaries, projected ZEC shifts, and pre-launch cabal protection.</p>
             </div>
-            <div class="hero-status">
-              <span class="chip">Verified signups only</span>
-              <div class="hero-status-copy">
-                <div><strong>Last updated UTC:</strong> ${escapeHtml(formattedTimestamps.utc)}</div>
-                <div><strong>US Eastern:</strong> ${escapeHtml(formattedTimestamps.eastern)}</div>
+            <div class="hero-meta">
+              <div class="hero-status">
+                <span class="chip">Verified signups only</span>
+                <div class="hero-status-copy">
+                  <div><strong>Last updated UTC:</strong> ${escapeHtml(formattedTimestamps.utc)}</div>
+                  <div><strong>US Eastern:</strong> ${escapeHtml(formattedTimestamps.eastern)}</div>
+                </div>
+                <a class="refresh-link" href="/dashboard?refresh=1">Refresh</a>
               </div>
-              <a class="refresh-link" href="/dashboard?refresh=1">Refresh</a>
+              ${
+                datePicker
+                  ? `
+              <div class="date-picker-card">
+                <span class="eyebrow">View dashboard as of date</span>
+                <div class="date-picker-copy">Choose a UTC date to rebuild the dashboard from only the rows known on that day.</div>
+                <label class="date-picker-label" for="dashboard-date-picker">As-of date (UTC)</label>
+                <input
+                  class="date-picker-input"
+                  id="dashboard-date-picker"
+                  type="date"
+                  min="${escapeHtml(datePicker.minDate)}"
+                  max="${escapeHtml(datePicker.maxDate)}"
+                  value="${escapeHtml(datePicker.selectedDate)}"
+                  data-latest-date="${escapeHtml(datePicker.latestDate)}"
+                  data-latest-href="${escapeHtml(datePicker.latestHref)}"
+                  data-date-href-prefix="${escapeHtml(datePicker.dateHrefPrefix)}"
+                />
+              </div>
+              `
+                  : ""
+              }
             </div>
           </div>
           ${renderSectionHookComposer(sections.overview.section)}
@@ -727,6 +939,35 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
           </section>
         </div>
 
+        <section class="panel" id="referral-tree">
+          <div class="section-head">
+            <div>
+              <span class="eyebrow">Referral tree</span>
+              <h2>Indirect 7-day momentum</h2>
+            </div>
+            <span class="chip">Trailing 7D vs prior 7D</span>
+          </div>
+          ${renderSectionHookComposer(sections["referral-tree"].section)}
+          <div class="stacked-panels">
+            <div>
+              <h3>Indirect leaders</h3>
+              ${renderRowsTable(
+                ["Referrer", "Indirect 7D", "2nd", "3rd", "4th+", "Direct 7D", "Attributed 7D", "Rank"],
+                referralTreeLeaderRows,
+                "No indirect referral leaders in the current 7-day window.",
+              )}
+            </div>
+            <div>
+              <h3>Indirect movers</h3>
+              ${renderRowsTable(
+                ["Referrer", "Gain", "Current Indirect 7D", "Previous Indirect 7D", "2nd Delta", "3rd Delta", "4th+ Delta", "Rank"],
+                referralTreeMoverRows,
+                "No positive indirect movers yet.",
+              )}
+            </div>
+          </div>
+        </section>
+
         <div id="daily-review">${renderReviewBlock("Daily review", snapshot.dailyReview, sections["daily-review"].section)}</div>
         <div id="weekly-review">${renderReviewBlock("Weekly review", snapshot.weeklyReview, sections["weekly-review"].section)}</div>
 
@@ -740,27 +981,39 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
             </div>
             ${renderSectionHookComposer(sections["leader-changes"].section)}
             <div class="review-grid">
-              <article class="subpanel">
-                <h3>All-time</h3>
-                <p>Current: ${escapeHtml(snapshot.leaderChanges.allTime.current?.name ?? "None")}</p>
-                <p>Previous: ${escapeHtml(snapshot.leaderChanges.allTime.previous?.name ?? "None")}</p>
-                <p>Changed: ${snapshot.leaderChanges.allTime.changed ? "Yes" : "No"}</p>
-                <p>${escapeHtml(snapshot.leaderChanges.allTime.comparisonWindow)}</p>
-              </article>
-              <article class="subpanel">
-                <h3>Daily</h3>
-                <p>Current: ${escapeHtml(snapshot.leaderChanges.daily.current?.name ?? "None")}</p>
-                <p>Previous: ${escapeHtml(snapshot.leaderChanges.daily.previous?.name ?? "None")}</p>
-                <p>Changed: ${snapshot.leaderChanges.daily.changed ? "Yes" : "No"}</p>
-                <p>${escapeHtml(snapshot.leaderChanges.daily.comparisonWindow)}</p>
-              </article>
-              <article class="subpanel">
-                <h3>Weekly</h3>
-                <p>Current: ${escapeHtml(snapshot.leaderChanges.weekly.current?.name ?? "None")}</p>
-                <p>Previous: ${escapeHtml(snapshot.leaderChanges.weekly.previous?.name ?? "None")}</p>
-                <p>Changed: ${snapshot.leaderChanges.weekly.changed ? "Yes" : "No"}</p>
-                <p>${escapeHtml(snapshot.leaderChanges.weekly.comparisonWindow)}</p>
-              </article>
+              ${renderHookableSubpanel(
+                "All-time",
+                [
+                  `Current: ${escapeHtml(snapshot.leaderChanges.allTime.current?.name ?? "None")}`,
+                  `Previous: ${escapeHtml(snapshot.leaderChanges.allTime.previous?.name ?? "None")}`,
+                  `Changed: ${snapshot.leaderChanges.allTime.changed ? "Yes" : "No"}`,
+                  escapeHtml(snapshot.leaderChanges.allTime.comparisonWindow),
+                ],
+                sections["leader-changes"].items[0],
+                snapshot.leaderChanges.allTime.changed,
+              )}
+              ${renderHookableSubpanel(
+                "Daily",
+                [
+                  `Current: ${escapeHtml(snapshot.leaderChanges.daily.current?.name ?? "None")}`,
+                  `Previous: ${escapeHtml(snapshot.leaderChanges.daily.previous?.name ?? "None")}`,
+                  `Changed: ${snapshot.leaderChanges.daily.changed ? "Yes" : "No"}`,
+                  escapeHtml(snapshot.leaderChanges.daily.comparisonWindow),
+                ],
+                sections["leader-changes"].items[1],
+                snapshot.leaderChanges.daily.changed,
+              )}
+              ${renderHookableSubpanel(
+                "Weekly",
+                [
+                  `Current: ${escapeHtml(snapshot.leaderChanges.weekly.current?.name ?? "None")}`,
+                  `Previous: ${escapeHtml(snapshot.leaderChanges.weekly.previous?.name ?? "None")}`,
+                  `Changed: ${snapshot.leaderChanges.weekly.changed ? "Yes" : "No"}`,
+                  escapeHtml(snapshot.leaderChanges.weekly.comparisonWindow),
+                ],
+                sections["leader-changes"].items[2],
+                snapshot.leaderChanges.weekly.changed,
+              )}
             </div>
           </section>
           <section class="panel" id="zec-changes">
@@ -846,6 +1099,7 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
               <button class="hook-action" type="button" id="hook-modal-copy">Copy</button>
               <button class="hook-action secondary" type="button" id="hook-modal-reset">Reset</button>
             </div>
+            <button class="hook-action more" type="button" id="hook-modal-more">More</button>
           </div>
         </div>
       </div>
@@ -861,6 +1115,8 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
           const modalTextarea = document.getElementById("hook-modal-textarea");
           const modalCopy = document.getElementById("hook-modal-copy");
           const modalReset = document.getElementById("hook-modal-reset");
+          const modalMore = document.getElementById("hook-modal-more");
+          const datePickerInput = document.getElementById("dashboard-date-picker");
           const closeButtons = document.querySelectorAll("[data-hook-close]");
           let activeHookId = null;
 
@@ -869,6 +1125,11 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
           const getText = (hookId) => window.localStorage.getItem(getStorageKey(hookId)) ?? getDefaultText(hookId);
           const setText = (hookId, value) => window.localStorage.setItem(getStorageKey(hookId), value);
           const resetText = (hookId) => window.localStorage.removeItem(getStorageKey(hookId));
+          const expandTextarea = (textarea) => {
+            if (!(textarea instanceof HTMLTextAreaElement)) return;
+            textarea.style.height = "auto";
+            textarea.style.height = textarea.scrollHeight + "px";
+          };
 
           const copyText = async (textarea) => {
             const value = textarea.value;
@@ -890,6 +1151,7 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
             const hookId = node.getAttribute("data-hook-input");
             if (!hookId || !hooks[hookId]) return;
             node.value = getText(hookId);
+            expandTextarea(node);
             node.addEventListener("input", () => setText(hookId, node.value));
           });
 
@@ -911,6 +1173,22 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
               const input = document.querySelector('[data-hook-input="' + hookId + '"]');
               if (input instanceof HTMLTextAreaElement) {
                 input.value = getDefaultText(hookId);
+                expandTextarea(input);
+              }
+            });
+          });
+
+          document.querySelectorAll("[data-hook-more]").forEach((button) => {
+            button.addEventListener("click", () => {
+              const hookId = button.getAttribute("data-hook-more");
+              if (!hookId) return;
+              const input = document.querySelector('[data-hook-input="' + hookId + '"]');
+              if (!(input instanceof HTMLTextAreaElement)) return;
+              const moreText = hooks[hookId]?.eli5Text;
+              if (moreText && !input.value.includes(moreText)) {
+                input.value = input.value.trimEnd() + "\\n\\n" + moreText;
+                setText(hookId, input.value);
+                expandTextarea(input);
               }
             });
           });
@@ -924,6 +1202,7 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
               modalTitle.textContent = "Marketing hook";
               modalLabel.textContent = hook.label;
               modalTextarea.value = getText(hookId);
+              expandTextarea(modalTextarea);
               modal.hidden = false;
               modalTextarea.focus();
             });
@@ -932,6 +1211,7 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
           if (modalTextarea instanceof HTMLTextAreaElement) {
             modalTextarea.addEventListener("input", () => {
               if (!activeHookId) return;
+              expandTextarea(modalTextarea);
               setText(activeHookId, modalTextarea.value);
             });
           }
@@ -948,6 +1228,17 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
             modalTextarea.value = getDefaultText(activeHookId);
           });
 
+          modalMore?.addEventListener("click", () => {
+            if (!activeHookId || !(modalTextarea instanceof HTMLTextAreaElement)) return;
+            const eli5Text = hooks[activeHookId]?.eli5Text;
+            if (!eli5Text) return;
+            if (!modalTextarea.value.includes(eli5Text)) {
+              modalTextarea.value = modalTextarea.value.trimEnd() + "\\n\\n" + eli5Text;
+              setText(activeHookId, modalTextarea.value);
+              expandTextarea(modalTextarea);
+            }
+          });
+
           closeButtons.forEach((button) => {
             button.addEventListener("click", () => {
               if (modal) modal.hidden = true;
@@ -961,6 +1252,21 @@ function renderDocument(snapshot: MarketingDashboardSnapshot): string {
               activeHookId = null;
             }
           });
+
+          if (datePickerInput instanceof HTMLInputElement) {
+            datePickerInput.addEventListener("change", () => {
+              const selectedDate = datePickerInput.value;
+              if (!selectedDate) return;
+              const latestDate = datePickerInput.dataset.latestDate;
+              const latestHref = datePickerInput.dataset.latestHref || "/dashboard/";
+              const dateHrefPrefix = datePickerInput.dataset.dateHrefPrefix || "/dashboard/";
+              const destination =
+                selectedDate === latestDate
+                  ? latestHref
+                  : dateHrefPrefix.replace(/\\/+$/, "/") + selectedDate + "/";
+              window.location.href = destination;
+            });
+          }
 
           window.addEventListener("keydown", (event) => {
             if (event.key === "Escape" && modal && !modal.hidden) {
@@ -990,23 +1296,82 @@ async function defaultLoadRows(): Promise<WaitlistReferralRow[]> {
   return toWaitlistReferralRows(rawRows);
 }
 
+function buildDatePickerOptions(rows: WaitlistReferralRow[], selectedDate: string, latestDate: string): DashboardDatePickerOptions | undefined {
+  const orderedDates = rows
+    .map((row) => row.created_at.slice(0, 10))
+    .filter((date, index, array) => Boolean(date) && array.indexOf(date) === index)
+    .sort();
+
+  const minDate = orderedDates[0];
+  if (!minDate) return undefined;
+
+  return {
+    selectedDate,
+    minDate,
+    maxDate: latestDate,
+    latestDate,
+    latestHref: "/dashboard",
+    dateHrefPrefix: "/dashboard/",
+  };
+}
+
+function parseRequestedDashboardDate(pathname: string): string | null {
+  const match = pathname.match(/^\/dashboard\/(\d{4}-\d{2}-\d{2})\/?$/);
+  if (!match) return null;
+  return isIsoDate(match[1]) ? match[1] : null;
+}
+
 export async function renderMarketingDashboardHtml(
   rows: WaitlistReferralRow[],
   scope: ReferralScope = "confirmed",
   now = new Date(),
+  options: { datePicker?: DashboardDatePickerOptions } = {},
 ): Promise<string> {
-  return renderDocument(buildMarketingDashboardSnapshot(rows, scope, now));
+  return renderDocument(buildMarketingDashboardSnapshot(rows, scope, now), options.datePicker);
 }
 
-export function createMarketingDashboardServer(options: MarketingDashboardServerOptions = {}): Server {
+export async function renderMarketingDashboardPage(options: RenderMarketingDashboardPageOptions = {}): Promise<string> {
   const loadRows = options.loadRows ?? defaultLoadRows;
   const now = options.now ?? (() => new Date());
   const defaultScope = options.defaultScope ?? "confirmed";
-  const cache = new Map<ReferralScope, CachedDashboard>();
+  const cache = options.cache;
+  const scope = parseScope(options.requestUrl, defaultScope);
+  const refresh = shouldRefresh(options.requestUrl);
+  const currentTime = now().getTime();
+  const rows = await loadRows();
+  const latestDate = getLatestRowDate(rows, new Date(currentTime));
+  const normalizedRequestedDate =
+    options.requestedDate && isIsoDate(options.requestedDate) ? options.requestedDate : null;
+  const selectedDate =
+    normalizedRequestedDate && normalizedRequestedDate <= latestDate
+      ? normalizedRequestedDate
+      : latestDate;
+  const cacheKey = `${scope}:${selectedDate}`;
+  const cached = cache?.get(cacheKey);
+
+  if (!refresh && cached && currentTime - cached.generatedAt < DASHBOARD_CACHE_TTL_MS) {
+    return cached.html;
+  }
+
+  const effectiveNow = endOfUtcDay(selectedDate);
+  const effectiveRows = rows.filter(
+    (row) => new Date(row.created_at).getTime() < startOfNextUtcDay(selectedDate).getTime(),
+  );
+  const html = await renderMarketingDashboardHtml(effectiveRows, scope, effectiveNow, {
+    datePicker: buildDatePickerOptions(rows, selectedDate, latestDate),
+  });
+
+  cache?.set(cacheKey, { html, generatedAt: currentTime });
+  return html;
+}
+
+export function createMarketingDashboardServer(options: MarketingDashboardServerOptions = {}): Server {
+  const cache = new Map<string, CachedDashboard>();
 
   return createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
+      const requestedDate = parseRequestedDashboardDate(url.pathname);
 
       if (url.pathname === "/") {
         res.statusCode = 302;
@@ -1015,28 +1380,19 @@ export function createMarketingDashboardServer(options: MarketingDashboardServer
         return;
       }
 
-      if (url.pathname !== "/dashboard") {
+      if (url.pathname !== "/dashboard" && url.pathname !== "/dashboard/" && requestedDate === null) {
         res.statusCode = 404;
         res.setHeader("content-type", "text/plain; charset=utf-8");
         res.end("Not found");
         return;
       }
 
-      const scope = parseScope(req.url, defaultScope);
-      const refresh = shouldRefresh(req.url);
-      const cached = cache.get(scope);
-      const currentTime = now().getTime();
-
-      if (!refresh && cached && currentTime - cached.generatedAt < DASHBOARD_CACHE_TTL_MS) {
-        res.statusCode = 200;
-        res.setHeader("content-type", "text/html; charset=utf-8");
-        res.end(cached.html);
-        return;
-      }
-
-      const rows = await loadRows();
-      const html = await renderMarketingDashboardHtml(rows, scope, new Date(currentTime));
-      cache.set(scope, { html, generatedAt: currentTime });
+      const html = await renderMarketingDashboardPage({
+        ...options,
+        cache,
+        requestUrl: req.url,
+        requestedDate,
+      });
       res.statusCode = 200;
       res.setHeader("content-type", "text/html; charset=utf-8");
       res.end(html);

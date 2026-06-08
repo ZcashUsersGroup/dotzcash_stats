@@ -1,53 +1,25 @@
 import { createDbClient } from "../dist/lib/db.js";
 import { fetchAllWaitlistRows, toWaitlistReferralRows } from "../dist/lib/leaders/stats.js";
-import { renderMarketingDashboardHtml } from "../dist/server.js";
+import { renderMarketingDashboardPage } from "../dist/server.js";
 
-function formatUtcDate(date) {
-  return date.toISOString().slice(0, 10);
+const cache = new Map();
+
+async function loadRows() {
+  const db = createDbClient();
+  const rawRows = await fetchAllWaitlistRows(db, { onlyVerified: true });
+  return toWaitlistReferralRows(rawRows).sort(
+    (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+  );
 }
 
-function getLatestRowDate(rows, fallbackDate = new Date()) {
-  if (rows.length === 0) {
-    return formatUtcDate(fallbackDate);
-  }
-
-  return rows.reduce((latestDate, row) => {
-    const rowDate = row.created_at.slice(0, 10);
-    return rowDate > latestDate ? rowDate : latestDate;
-  }, rows[0].created_at.slice(0, 10));
-}
-
-function endOfUtcDay(dateString) {
-  return new Date(`${dateString}T23:59:59.999Z`);
-}
-
-function startOfNextUtcDay(dateString) {
-  const date = new Date(`${dateString}T00:00:00.000Z`);
-  date.setUTCDate(date.getUTCDate() + 1);
-  return date;
-}
-
-export async function GET() {
+export async function GET(request) {
   try {
-    const db = createDbClient();
-    const rawRows = await fetchAllWaitlistRows(db, { onlyVerified: true });
-    const rows = toWaitlistReferralRows(rawRows).sort(
-      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
-    );
-
-    const latestDate = getLatestRowDate(rows, new Date());
-    const effectiveRows = rows.filter(
-      (row) => new Date(row.created_at).getTime() < startOfNextUtcDay(latestDate).getTime(),
-    );
-    const html = await renderMarketingDashboardHtml(effectiveRows, "confirmed", endOfUtcDay(latestDate), {
-      datePicker: {
-        selectedDate: latestDate,
-        minDate: rows[0]?.created_at.slice(0, 10) ?? latestDate,
-        maxDate: latestDate,
-        latestDate,
-        latestHref: "/dashboard/",
-        dateHrefPrefix: "/dashboard/",
-      },
+    const url = new URL(request.url);
+    const html = await renderMarketingDashboardPage({
+      loadRows,
+      cache,
+      requestUrl: request.url,
+      requestedDate: url.searchParams.get("date"),
     });
 
     return new Response(html, {

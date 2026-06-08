@@ -3,26 +3,29 @@
   "framework": null,
   "buildCommand": "npm run build",
   "outputDirectory": "public",
+  "redirects": [
+    {
+      "source": "/",
+      "destination": "/dashboard",
+      "permanent": false
+    }
+  ],
   "rewrites": [
     {
       "source": "/dashboard",
-      "has": [
-        {
-          "type": "query",
-          "key": "refresh"
-        }
-      ],
       "destination": "/api/dashboard"
     },
     {
       "source": "/dashboard/",
-      "has": [
-        {
-          "type": "query",
-          "key": "refresh"
-        }
-      ],
       "destination": "/api/dashboard"
+    },
+    {
+      "source": "/dashboard/:date",
+      "destination": "/api/dashboard?date=:date"
+    },
+    {
+      "source": "/dashboard/:date/",
+      "destination": "/api/dashboard?date=:date"
     }
   ]
 }
