@@ -60,6 +60,15 @@ function formatZec(value: number): string {
   return `${value.toFixed(4)} ZEC`;
 }
 
+function formatLongUtcDate(value: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).format(new Date(value));
+}
+
 function formatDashboardTimestamps(value: string): { utc: string; eastern: string } {
   const date = new Date(value);
 
@@ -96,6 +105,11 @@ function serializeForScript(value: unknown): string {
 interface TableRowData {
   cells: string[];
   hook?: DashboardMarketingHook;
+}
+
+interface ExpandableTableRowData extends TableRowData {
+  id: string;
+  detailHtml: string;
 }
 
 function formatUtcDate(date: Date): string {
@@ -195,6 +209,40 @@ function renderRowsTable(headers: string[], rows: TableRowData[], emptyLabel: st
   `;
 }
 
+function renderExpandableRowsTable(headers: string[], rows: ExpandableTableRowData[], emptyLabel: string): string {
+  if (rows.length === 0) {
+    return `<div class="empty">${escapeHtml(emptyLabel)}</div>`;
+  }
+
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            ${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}
+            <th class="hook-col">Hook</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows
+            .map(
+              (row) => `
+                <tr>
+                  ${row.cells.map((cell) => `<td>${cell}</td>`).join("")}
+                  <td class="hook-cell">${row.hook ? renderHookTrigger(row.hook) : ""}</td>
+                </tr>
+                <tr class="detail-row" id="${escapeHtml(row.id)}" hidden>
+                  <td colspan="${headers.length + 1}">${row.detailHtml}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
 function renderReviewBlock(title: string, review: MarketingDashboardSnapshot["dailyReview"], hook: DashboardMarketingHook): string {
   return `
     <section class="panel">
@@ -240,6 +288,101 @@ function renderHookableSubpanel(title: string, paragraphs: string[], hook?: Dash
     </div>
     ${paragraphs.map((paragraph) => `<p>${paragraph}</p>`).join("")}
   </article>`;
+}
+
+function renderCabalBreakdownDetail(
+  entry: MarketingDashboardSnapshot["cabalProtection"][number],
+  hook: DashboardMarketingHook | undefined,
+): string {
+  const windows = [
+    ["1D", entry.breakdown.last1d],
+    ["7D", entry.breakdown.last7d],
+    ["All-time", entry.breakdown.allTime],
+  ] as const;
+
+  return `
+    <div class="cabal-detail">
+      <div class="cabal-detail-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Window</th>
+              <th>Direct</th>
+              <th>2nd</th>
+              <th>3rd</th>
+              <th>4th+</th>
+              <th>Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${windows
+              .map(
+                ([label, stats]) => `
+                  <tr>
+                    <td>${escapeHtml(label)}</td>
+                    <td>${formatNumber(stats.directReferrals)}</td>
+                    <td>${formatNumber(stats.secondOrderReferrals)}</td>
+                    <td>${formatNumber(stats.thirdOrderReferrals)}</td>
+                    <td>${formatNumber(stats.fourthPlusReferrals)}</td>
+                    <td>${formatNumber(stats.attributedReferrals)}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+      ${hook ? renderSectionHookComposer(hook) : ""}
+    </div>
+  `;
+}
+
+function roundTweetZec(value: number): string {
+  return Number.isInteger(value) ? formatNumber(value) : value.toFixed(4).replace(/\.?0+$/, "");
+}
+
+function shouldRenderWeeklyTweet(snapshot: MarketingDashboardSnapshot): boolean {
+  const date = new Date(snapshot.generatedAt);
+  return date.getUTCDay() === 0 && date.getUTCHours() === 23 && date.getUTCMinutes() === 59 && date.getUTCSeconds() === 59;
+}
+
+function renderWeeklyTweetTemplate(snapshot: MarketingDashboardSnapshot): string {
+  const weeklyWinner = snapshot.weeklyReview.winnerWhy.leader;
+  const runnerUp = snapshot.weeklyReview.winnerWhy.runnerUp;
+  const allTimeLeader = snapshot.headlineKpis.allTimeLeader;
+  const topNewcomer = snapshot.newcomers[0] ?? null;
+  const growthPct = snapshot.weeklyReview.campaignHealth.growthPct;
+  const growthLine = Number.isFinite(growthPct)
+    ? growthPct < 0
+      ? `Referral volume was down ${Math.abs(growthPct)}% versus the previous window.`
+      : `Referral volume was up ${growthPct}% versus the previous window.`
+    : "Referral volume was up from zero versus the previous window.";
+  const streakLine = snapshot.weeklyReview.winnerWhy.onStreak ? ` "${weeklyWinner?.name ?? "None"}" is holding a weekly streak.` : "";
+
+  return `Boss told quant to tell me that as of ${formatLongUtcDate(snapshot.generatedAt)}:
+
+${formatNumber(snapshot.headlineKpis.waitlist)} names are on the 
+@ZcashNames
+ early-access waitlist.
+
+${roundTweetZec(snapshot.headlineKpis.rewardsPot)} 
+$ZEC
+
+ is projected to be distributed if everyone on the waitlist claims their name during the early-access period.
+
+"${allTimeLeader?.name ?? "None"}" has the most total attributed referrals so far.
+
+"${weeklyWinner?.name ?? "None"}" led from ${snapshot.weeklyReview.periodStart} to ${snapshot.weeklyReview.periodEnd} with ${formatNumber(snapshot.weeklyReview.winnerWhy.leaderReferrals)} referrals, a gap of ${formatNumber(snapshot.weeklyReview.winnerWhy.gapToRunnerUp)} over the runner-up, "${runnerUp?.name ?? "None"}".${streakLine}
+
+"${topNewcomer?.name ?? "None"}" was the strongest newcomer with ${formatNumber(topNewcomer?.current7DayAttributedReferrals ?? 0)} referrals in the last 7 days.
+
+${growthLine}
+
+Referred signups were ${formatPercent(snapshot.weeklyReview.campaignHealth.referredSharePct)} of ${formatNumber(snapshot.weeklyReview.campaignHealth.totalSignups)} signups.
+
+As boss says, "Let's grow!"
+
+http://ZcashNames.com`;
 }
 
 function renderDocument(snapshot: MarketingDashboardSnapshot, datePicker?: DashboardDatePickerOptions): string {
@@ -317,9 +460,10 @@ function renderDocument(snapshot: MarketingDashboardSnapshot, datePicker?: Dashb
     ],
     hook: sections["zec-changes"].items[snapshot.zecChanges.daily.length + index],
   }));
-  const cabalRows: TableRowData[] = snapshot.cabalProtection.map((entry, index) => ({
+  const cabalRows: ExpandableTableRowData[] = snapshot.cabalProtection.map((entry, index) => ({
+    id: `cabal-detail-${escapeHtml(entry.canonicalReferralCode)}`,
     cells: [
-      `<strong>${escapeHtml(entry.name)}</strong><span class="meta">@${escapeHtml(entry.referralCode)}</span>`,
+      `<button class="table-row-toggle" type="button" data-row-toggle="cabal-detail-${escapeHtml(entry.canonicalReferralCode)}" aria-expanded="false"><strong>${escapeHtml(entry.name)}</strong><span class="meta">@${escapeHtml(entry.referralCode)}</span></button>`,
       formatZec(entry.fixedPayout),
       formatZec(entry.commissionPayout),
       formatPercent(entry.commissionRate * 100),
@@ -328,9 +472,14 @@ function renderDocument(snapshot: MarketingDashboardSnapshot, datePicker?: Dashb
         : `${formatNumber(entry.referralsToNextTier)} to ${formatPercent((entry.nextTierRate ?? 0) * 100)}`,
     ],
     hook: sections["cabal-protection"].items[index],
+    detailHtml: renderCabalBreakdownDetail(
+      entry,
+      sections["cabal-protection"].items[snapshot.cabalProtection.length + index],
+    ),
   }));
   const hookEntries = Object.values(sections).flatMap((section) => [section.section, ...section.items]);
   const hooksPayload = Object.fromEntries(hookEntries.map((hook) => [hook.id, hook]));
+  const weeklyTweet = shouldRenderWeeklyTweet(snapshot) ? renderWeeklyTweetTemplate(snapshot) : null;
   const tocLinks = [
     ["overview", "Overview"],
     ["streaks", "Streaks"],
@@ -344,6 +493,7 @@ function renderDocument(snapshot: MarketingDashboardSnapshot, datePicker?: Dashb
     ["cabal-protection", "Cabal rewards"],
     ["shareworthy", "Shareworthy callouts"],
     ["funnel", "Referral funnel"],
+    ...(weeklyTweet ? [["weekly-tweet", "Template tweet"]] : []),
   ];
 
   return `<!doctype html>
@@ -612,6 +762,35 @@ function renderDocument(snapshot: MarketingDashboardSnapshot, datePicker?: Dashb
           overflow-x: auto;
           -webkit-overflow-scrolling: touch;
         }
+        .table-row-toggle {
+          display: inline-flex;
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 2px;
+          padding: 0;
+          border: 0;
+          background: transparent;
+          color: inherit;
+          font: inherit;
+          text-align: left;
+          cursor: pointer;
+        }
+        .table-row-toggle strong {
+          color: var(--accent);
+        }
+        .detail-row td {
+          padding: 0;
+          border-bottom: none;
+          background: rgba(255, 248, 236, 0.7);
+        }
+        .cabal-detail {
+          display: grid;
+          gap: 16px;
+          padding: 18px;
+        }
+        .cabal-detail-table table {
+          min-width: 0;
+        }
         table {
           width: 100%;
           border-collapse: collapse;
@@ -775,6 +954,17 @@ function renderDocument(snapshot: MarketingDashboardSnapshot, datePicker?: Dashb
           margin-top: 26px;
           color: var(--muted);
           font-size: 0.9rem;
+        }
+        .tweet-template {
+          margin: 0;
+          padding: 18px;
+          border-radius: 18px;
+          border: 1px solid var(--line);
+          background: var(--panel-strong);
+          white-space: pre-wrap;
+          word-break: break-word;
+          font: inherit;
+          line-height: 1.5;
         }
         .stacked-panels {
           display: grid;
@@ -972,6 +1162,22 @@ function renderDocument(snapshot: MarketingDashboardSnapshot, datePicker?: Dashb
 
         <div id="daily-review">${renderReviewBlock("Daily review", snapshot.dailyReview, sections["daily-review"].section)}</div>
         <div id="weekly-review">${renderReviewBlock("Weekly review", snapshot.weeklyReview, sections["weekly-review"].section)}</div>
+        ${
+          weeklyTweet
+            ? `
+        <section class="panel" id="weekly-tweet">
+          <div class="section-head">
+            <div>
+              <span class="eyebrow">Template tweet</span>
+              <h2>Sunday weekly summary</h2>
+            </div>
+            <span class="chip">UTC Sunday close</span>
+          </div>
+          <pre class="tweet-template">${escapeHtml(weeklyTweet)}</pre>
+        </section>
+        `
+            : ""
+        }
 
         <div class="leader-grid">
           <section class="panel" id="leader-changes">
@@ -1048,7 +1254,7 @@ function renderDocument(snapshot: MarketingDashboardSnapshot, datePicker?: Dashb
             <span class="chip">Internal only</span>
           </div>
           ${renderSectionHookComposer(sections["cabal-protection"].section)}
-          ${renderRowsTable(["Member", "Fixed", "Commission", "Rate", "Next Tier"], cabalRows, "No cabal members found in the current data set.")}
+          ${renderExpandableRowsTable(["Member", "Fixed", "Commission", "Rate", "Next Tier"], cabalRows, "No cabal members found in the current data set.")}
         </section>
 
         <div class="callout-grid">
@@ -1269,6 +1475,18 @@ function renderDocument(snapshot: MarketingDashboardSnapshot, datePicker?: Dashb
               window.location.href = destination;
             });
           }
+
+          document.querySelectorAll("[data-row-toggle]").forEach((button) => {
+            button.addEventListener("click", () => {
+              const targetId = button.getAttribute("data-row-toggle");
+              if (!targetId) return;
+              const detailRow = document.getElementById(targetId);
+              if (!(detailRow instanceof HTMLTableRowElement)) return;
+              const nextHidden = !detailRow.hidden;
+              detailRow.hidden = nextHidden;
+              button.setAttribute("aria-expanded", nextHidden ? "false" : "true");
+            });
+          });
 
           window.addEventListener("keydown", (event) => {
             if (event.key === "Escape" && modal && !modal.hidden) {

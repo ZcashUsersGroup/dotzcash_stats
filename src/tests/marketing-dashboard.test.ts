@@ -214,7 +214,7 @@ test("createMarketingDashboardServer renders html from fixture rows", async () =
     assert.match(html, /Referral tree/i);
     assert.match(html, /Indirect leaders/i);
     assert.match(html, /Indirect movers/i);
-    assert.match(html, /Cabal protection/i);
+    assert.match(html, /Cabal rewards/i);
     assert.match(html, /Last updated UTC:/i);
     assert.match(html, /US Eastern:/i);
     assert.match(html, /May 17, 2026, 23:59:59 UTC/i);
@@ -228,8 +228,13 @@ test("createMarketingDashboardServer renders html from fixture rows", async () =
     assert.match(html, /data-hook-trigger="overview:waitlist"/i);
     assert.match(html, /data-hook-trigger="referral-tree:leader:beta"/i);
     assert.match(html, /data-hook-trigger="leader-changes:all-time:beta"/i);
+    assert.match(html, /data-row-toggle="cabal-detail-alpha"/i);
     assert.match(html, /data-hook-editor="section:overview"/i);
     assert.match(html, /data-hook-editor="section:referral-tree"/i);
+    assert.match(html, /data-hook-editor="cabal-breakdown:alpha"/i);
+    assert.match(html, /Template tweet/i);
+    assert.match(html, /Boss told quant to tell me that as of May 17, 2026:/i);
+    assert.match(html, /As boss says, &#39;?Let&#39;s grow!|As boss says, &quot;Let&#39;s grow!&quot;|As boss says, &quot;Let&#39;s grow!&quot;/i);
     assert.match(html, /data-hook-more="section:overview"/i);
     assert.doesNotMatch(html, /data-hook-combine=/i);
     assert.doesNotMatch(html, /hook-modal-combine/i);

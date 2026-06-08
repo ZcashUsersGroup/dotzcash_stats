@@ -119,6 +119,21 @@ export interface DashboardCabalProtectionEntry {
   referralsToNextTier: number | null;
   nextTierRate: number | null;
   nextTierProjectedPayout: number | null;
+  breakdown: DashboardCabalBreakdown;
+}
+
+export interface DashboardCabalLevelStats {
+  directReferrals: number;
+  secondOrderReferrals: number;
+  thirdOrderReferrals: number;
+  fourthPlusReferrals: number;
+  attributedReferrals: number;
+}
+
+export interface DashboardCabalBreakdown {
+  last1d: DashboardCabalLevelStats;
+  last7d: DashboardCabalLevelStats;
+  allTime: DashboardCabalLevelStats;
 }
 
 export interface DashboardReferralFunnel {
@@ -259,6 +274,7 @@ export interface ShareworthyStatsSnapshot {
     referralsToNextTier: number | null;
     nextTierRate: number | null;
     nextTierProjectedPayout: number | null;
+    breakdown: DashboardCabalBreakdown;
   }>;
 }
 
@@ -580,19 +596,63 @@ function getNextCommissionTier(totalAttributedReferrals: number): { referralsToN
   };
 }
 
+function emptyCabalLevelStats(): DashboardCabalLevelStats {
+  return {
+    directReferrals: 0,
+    secondOrderReferrals: 0,
+    thirdOrderReferrals: 0,
+    fourthPlusReferrals: 0,
+    attributedReferrals: 0,
+  };
+}
+
+function buildCabalLevelStats(
+  descendants: Array<{ depth: number; created_at: string }>,
+  startMs: number | null,
+  endMs: number | null,
+): DashboardCabalLevelStats {
+  const stats = emptyCabalLevelStats();
+
+  for (const descendant of descendants) {
+    const createdAtMs = new Date(descendant.created_at).getTime();
+    if (!Number.isFinite(createdAtMs)) continue;
+    if (startMs !== null && createdAtMs < startMs) continue;
+    if (endMs !== null && createdAtMs >= endMs) continue;
+
+    if (descendant.depth === 1) {
+      stats.directReferrals += 1;
+    } else if (descendant.depth === 2) {
+      stats.secondOrderReferrals += 1;
+    } else if (descendant.depth === 3) {
+      stats.thirdOrderReferrals += 1;
+    } else {
+      stats.fourthPlusReferrals += 1;
+    }
+  }
+
+  stats.attributedReferrals =
+    stats.directReferrals + stats.secondOrderReferrals + stats.thirdOrderReferrals + stats.fourthPlusReferrals;
+  return stats;
+}
+
 function buildCabalHookText(entry: DashboardCabalProtectionEntry): string {
   const currentRate = formatRatePercent(entry.commissionRate * 100);
-  const baseText = `${entry.name}, you're projected to earn ${entry.commissionPayout.toFixed(4)} ZEC at ${currentRate} commission, compared with ${entry.fixedPayout.toFixed(4)} ZEC under the fixed model.`;
+  const baseText = `${entry.name}, you're projected to earn ${entry.commissionPayout.toFixed(4)} ZEC at ${currentRate} cabal commission, compared with ${entry.fixedPayout.toFixed(4)} ZEC under the normie fixed model.`;
 
   if (
     entry.referralsToNextTier === null ||
     entry.nextTierRate === null ||
     entry.nextTierProjectedPayout === null
   ) {
-    return `${baseText}\n\nYou are already at the top 30% commission tier.\n\nReferrals must buy during early access to count.`;
+    return `${baseText}\n\nYou are already at the top 30% tier.\n\nReferrals must buy during early access to count. We're going to reach out to them by email to give them reminders as we approach the early access period.\n\nThanks for everything---`;
   }
 
-  return `${baseText}\n\n${entry.referralsToNextTier} more referrals get you to the ${formatRatePercent(entry.nextTierRate * 100)} tier, raising this projection to ${entry.nextTierProjectedPayout.toFixed(4)} ZEC.\n\nReferrals must buy during early access to count.`;
+  return `${baseText}\n\n${entry.referralsToNextTier} more referrals get you to the ${formatRatePercent(entry.nextTierRate * 100)} tier, raising this projection to ${entry.nextTierProjectedPayout.toFixed(4)} ZEC.\n\nReferrals must buy during early access to count. We're going to reach out to them by email to give them reminders as we approach the early access period.\n\nThanks for everything---`;
+}
+
+function buildCabalBreakdownHookText(entry: DashboardCabalProtectionEntry): string {
+  const { last1d, last7d, allTime } = entry.breakdown;
+  return `${entry.name}, your tree added ${last1d.directReferrals} direct, ${last1d.secondOrderReferrals} second-order, ${last1d.thirdOrderReferrals} third-order, and ${last1d.fourthPlusReferrals} fourth-plus referrals over the last day. Over the last 7 days, that pace is ${last7d.directReferrals} direct and ${last7d.attributedReferrals} total attributed referrals. All-time, your tree stands at ${allTime.directReferrals} direct and ${allTime.attributedReferrals} total attributed referrals. Keep pushing the whole tree before early access.\n\nReferrals must buy during early access to count.`;
 }
 
 function buildWindowSummaryFromCounts(
@@ -1021,6 +1081,14 @@ function buildSectionHooks(args: {
       `This is how much more ${entry.name} would earn under commission pricing than under the fixed model.`,
     ),
   );
+  const cabalBreakdownItems = args.cabalProtection.map((entry) =>
+    buildHook(
+      `cabal-breakdown:${entry.canonicalReferralCode}`,
+      `${entry.name} referral levels`,
+      buildCabalBreakdownHookText(entry),
+      `This breaks ${entry.name}'s referral tree into direct, second-order, third-order, and fourth-plus layers across short and long windows.`,
+    ),
+  );
   const leaderChangeItems = [
     buildHook(
       `leader-changes:all-time:${args.leaderChanges.allTime.current?.canonicalReferralCode ?? "none"}`,
@@ -1170,7 +1238,7 @@ function buildSectionHooks(args: {
             : "No cabal protection difference is visible in the current verified data.",
           "This compares projected payout under the commission model and the fixed model.",
         ),
-        items: cabalItems,
+        items: [...cabalItems, ...cabalBreakdownItems],
       },
       shareworthy: {
         section: buildHook(
@@ -1500,6 +1568,11 @@ export function buildMarketingDashboardSnapshot(
       });
       const identity = buildLeaderIdentity(dashboard.canonicalReferralCode, metadata);
       if (!identity) return null;
+      const breakdown = {
+        last1d: buildCabalLevelStats(dashboard.descendants, now.getTime() - DAY_MS, now.getTime() + 1),
+        last7d: buildCabalLevelStats(dashboard.descendants, now.getTime() - WEEK_MS, now.getTime() + 1),
+        allTime: buildCabalLevelStats(dashboard.descendants, null, null),
+      };
 
       return {
         name: identity.name,
@@ -1513,12 +1586,18 @@ export function buildMarketingDashboardSnapshot(
         commissionRate: commission.commissionRate,
         ...(() => {
           const nextTier = getNextCommissionTier(dashboard.totalAttributedReferrals);
+          const projectedRevenuePerReferral =
+            dashboard.totalAttributedReferrals > 0 ? commission.projectedRevenue / dashboard.totalAttributedReferrals : 0;
+          const projectedRevenueAtNextTier =
+            commission.projectedRevenue +
+            projectedRevenuePerReferral * (nextTier.referralsToNextTier ?? 0);
           return {
             ...nextTier,
             nextTierProjectedPayout:
-              nextTier.nextTierRate === null ? null : roundZec(commission.projectedRevenue * nextTier.nextTierRate),
+              nextTier.nextTierRate === null ? null : roundZec(projectedRevenueAtNextTier * nextTier.nextTierRate),
           };
         })(),
+        breakdown,
       };
     })
     .filter((entry): entry is DashboardCabalProtectionEntry => Boolean(entry))
@@ -1639,6 +1718,7 @@ export function buildShareworthyStatsSnapshot(
       referralsToNextTier: entry.referralsToNextTier,
       nextTierRate: entry.nextTierRate,
       nextTierProjectedPayout: entry.nextTierProjectedPayout,
+      breakdown: entry.breakdown,
     })),
   };
 }
