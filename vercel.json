@@ -2,5 +2,27 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
   "buildCommand": "npm run build",
-  "outputDirectory": "public"
+  "outputDirectory": "public",
+  "rewrites": [
+    {
+      "source": "/dashboard",
+      "has": [
+        {
+          "type": "query",
+          "key": "refresh"
+        }
+      ],
+      "destination": "/api/dashboard"
+    },
+    {
+      "source": "/dashboard/",
+      "has": [
+        {
+          "type": "query",
+          "key": "refresh"
+        }
+      ],
+      "destination": "/api/dashboard"
+    }
+  ]
 }
